@@ -32,4 +32,4 @@ The executable is written to `dist/Windy Image Tool.exe`.
 
 ## Downloads
 
-Get the latest portable Windows build from [Releases](https://github.com/OWNER/windy-image-tool/releases).
+Get the latest portable Windows build from [Releases](https://github.com/fwqefwqef/windy-image-tool/releases).
