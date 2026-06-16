@@ -8,13 +8,16 @@ from PIL import Image, ImageTk
 
 from operations import (
     FORMAT_EXTENSIONS,
+    MEME_FONTS,
     adjust_hue_image,
     compress_image,
     convert_image,
     crop_image,
     ensure_output_dir,
+    export_meme,
     flip_image,
     load_image,
+    render_meme_text,
     resize_image,
     rotate_image,
     shift_hue,
@@ -332,11 +335,272 @@ class CropCanvas(tk.Canvas):
         self.initial_crop = None
 
 
+class MemeCanvas(tk.Canvas):
+    """Layered editor: a base image with draggable/resizable image and text layers."""
+
+    HANDLE = 12
+
+    def __init__(self, master: tk.Misc, on_select, canvas_bg: str = "#f2f2f2", text_color: str = "#1a1a1a", **kwargs):
+        super().__init__(master, bg=canvas_bg, highlightthickness=0, **kwargs)
+        self.on_select = on_select
+        self.canvas_bg = canvas_bg
+        self.placeholder_color = dim_color(text_color)
+        self.base_image: Image.Image | None = None
+        self.base_photo: ImageTk.PhotoImage | None = None
+        self.layers: list[dict] = []
+        self.selected: dict | None = None
+        self.scale = 1.0
+        self.offset_x = 0
+        self.offset_y = 0
+        self.drag_mode: str | None = None
+        self.drag_start: tuple[int, int] | None = None
+        self.drag_initial: tuple[float, float] | None = None
+        self._render_size: tuple[int, int] = (0, 0)
+
+        self.bind("<ButtonPress-1>", self._on_press)
+        self.bind("<B1-Motion>", self._on_drag)
+        self.bind("<ButtonRelease-1>", self._on_release)
+
+    def apply_theme(self, canvas_bg: str, text_color: str) -> None:
+        self.canvas_bg = canvas_bg
+        self.placeholder_color = dim_color(text_color)
+        self.configure(bg=canvas_bg)
+        self.redraw(force_image=True)
+
+    def _compute_layout(self) -> None:
+        if not self.base_image:
+            return
+        canvas_w = max(self.winfo_width(), 1)
+        canvas_h = max(self.winfo_height(), 1)
+        scale_x = canvas_w / self.base_image.width
+        scale_y = canvas_h / self.base_image.height
+        self.scale = min(scale_x, scale_y)
+        draw_w = int(self.base_image.width * self.scale)
+        draw_h = int(self.base_image.height * self.scale)
+        self.offset_x = (canvas_w - draw_w) // 2
+        self.offset_y = (canvas_h - draw_h) // 2
+
+    def _img_to_canvas(self, x: float, y: float) -> tuple[float, float]:
+        return self.offset_x + x * self.scale, self.offset_y + y * self.scale
+
+    def set_base(self, image: Image.Image) -> None:
+        self.base_image = image.convert("RGBA")
+        self.layers = []
+        self.selected = None
+        self._render_size = (0, 0)
+        self.redraw(force_image=True)
+        self.on_select(None)
+
+    def _layer_photo(self, layer: dict) -> tuple[ImageTk.PhotoImage, int, int]:
+        if layer["type"] == "image":
+            draw_w = max(1, int(round(layer["w"] * self.scale)))
+            draw_h = max(1, int(round(layer["h"] * self.scale)))
+            rendered = layer["image"].convert("RGBA").resize((draw_w, draw_h), Image.Resampling.LANCZOS)
+        else:
+            rendered = render_meme_text(
+                layer["text"],
+                layer["font"],
+                layer["size"] * self.scale,
+                layer["fill"],
+                layer["outline"],
+                layer["outline_width"] * self.scale,
+            )
+            draw_w, draw_h = rendered.width, rendered.height
+        return ImageTk.PhotoImage(rendered), draw_w, draw_h
+
+    def _create_layer_item(self, layer: dict) -> None:
+        photo, draw_w, draw_h = self._layer_photo(layer)
+        layer["_photo"] = photo
+        layer["_disp_w"] = draw_w
+        layer["_disp_h"] = draw_h
+        cx, cy = self._img_to_canvas(layer["x"], layer["y"])
+        layer["item"] = self.create_image(cx, cy, anchor="nw", image=photo)
+
+    def _refresh_layer(self, layer: dict) -> None:
+        photo, draw_w, draw_h = self._layer_photo(layer)
+        layer["_photo"] = photo
+        layer["_disp_w"] = draw_w
+        layer["_disp_h"] = draw_h
+        self.itemconfigure(layer["item"], image=photo)
+
+    def redraw(self, force_image: bool = False) -> None:
+        if not self.base_image:
+            canvas_w = max(self.winfo_width(), 1)
+            canvas_h = max(self.winfo_height(), 1)
+            size = (canvas_w, canvas_h)
+            if size == self._render_size and not force_image:
+                return
+            self._render_size = size
+            self.delete("all")
+            self.create_text(
+                canvas_w // 2,
+                canvas_h // 2,
+                text="Load a base image to start a meme",
+                fill=self.placeholder_color,
+            )
+            return
+
+        self._compute_layout()
+        self._render_size = (max(self.winfo_width(), 1), max(self.winfo_height(), 1))
+        self.delete("all")
+        draw_w = max(1, int(self.base_image.width * self.scale))
+        draw_h = max(1, int(self.base_image.height * self.scale))
+        preview = self.base_image.resize((draw_w, draw_h), Image.Resampling.LANCZOS)
+        self.base_photo = ImageTk.PhotoImage(preview)
+        self.create_image(self.offset_x, self.offset_y, anchor="nw", image=self.base_photo)
+        for layer in self.layers:
+            self._create_layer_item(layer)
+        self._draw_selection()
+
+    def _draw_selection(self) -> None:
+        self.delete("sel")
+        if not self.selected:
+            return
+        layer = self.selected
+        cx, cy = self._img_to_canvas(layer["x"], layer["y"])
+        x2 = cx + layer["_disp_w"]
+        y2 = cy + layer["_disp_h"]
+        self.create_rectangle(cx, cy, x2, y2, outline="#4da3ff", width=2, dash=(4, 3), tags="sel")
+        if layer["type"] == "image":
+            self.create_rectangle(
+                x2 - self.HANDLE,
+                y2 - self.HANDLE,
+                x2,
+                y2,
+                fill="#ffffff",
+                outline="#4da3ff",
+                tags="sel",
+            )
+
+    def _layer_at(self, cx: int, cy: int) -> dict | None:
+        for layer in reversed(self.layers):
+            lx, ly = self._img_to_canvas(layer["x"], layer["y"])
+            if lx <= cx <= lx + layer["_disp_w"] and ly <= cy <= ly + layer["_disp_h"]:
+                return layer
+        return None
+
+    def add_image_layer(self, image: Image.Image) -> None:
+        if not self.base_image:
+            return
+        src = image.convert("RGBA")
+        width = self.base_image.width * 0.4
+        height = width * src.height / src.width if src.width else width
+        layer = {
+            "type": "image",
+            "image": src,
+            "w": width,
+            "h": height,
+            "x": (self.base_image.width - width) / 2,
+            "y": (self.base_image.height - height) / 2,
+        }
+        self.layers.append(layer)
+        self._create_layer_item(layer)
+        self.selected = layer
+        self.on_select(layer)
+        self._draw_selection()
+
+    def add_text_layer(self, **props) -> None:
+        if not self.base_image:
+            return
+        default_size = max(14, self.base_image.height // 12)
+        layer = {
+            "type": "text",
+            "text": props.get("text", "TEXT"),
+            "font": props.get("font", "Impact"),
+            "size": props.get("size", default_size),
+            "fill": props.get("fill", "#ffffff"),
+            "outline": props.get("outline", "#000000"),
+            "outline_width": props.get("outline_width", max(2, default_size // 14)),
+            "x": 0.0,
+            "y": self.base_image.height * 0.04,
+        }
+        self.layers.append(layer)
+        self._create_layer_item(layer)
+        image_width = layer["_disp_w"] / self.scale if self.scale else layer["_disp_w"]
+        layer["x"] = max(0.0, (self.base_image.width - image_width) / 2)
+        cx, cy = self._img_to_canvas(layer["x"], layer["y"])
+        self.coords(layer["item"], cx, cy)
+        self.selected = layer
+        self.on_select(layer)
+        self._draw_selection()
+
+    def update_selected(self, **props) -> None:
+        if not self.selected:
+            return
+        self.selected.update(props)
+        self._refresh_layer(self.selected)
+        self._draw_selection()
+
+    def delete_selected(self) -> None:
+        if not self.selected:
+            return
+        item = self.selected.get("item")
+        if item is not None:
+            self.delete(item)
+        self.layers.remove(self.selected)
+        self.selected = None
+        self.on_select(None)
+        self._draw_selection()
+
+    def _on_press(self, event: tk.Event) -> None:
+        if not self.base_image:
+            return
+        if self.selected and self.selected["type"] == "image":
+            cx, cy = self._img_to_canvas(self.selected["x"], self.selected["y"])
+            x2 = cx + self.selected["_disp_w"]
+            y2 = cy + self.selected["_disp_h"]
+            if x2 - self.HANDLE <= event.x <= x2 + 3 and y2 - self.HANDLE <= event.y <= y2 + 3:
+                self.drag_mode = "resize"
+                self.drag_start = (event.x, event.y)
+                self.drag_initial = (self.selected["w"], self.selected["h"])
+                return
+
+        hit = self._layer_at(event.x, event.y)
+        if hit is not self.selected:
+            self.selected = hit
+            self.on_select(hit)
+        if hit is not None:
+            self.drag_mode = "move"
+            self.drag_start = (event.x, event.y)
+            self.drag_initial = (hit["x"], hit["y"])
+        else:
+            self.drag_mode = None
+        self._draw_selection()
+
+    def _on_drag(self, event: tk.Event) -> None:
+        if not self.drag_mode or not self.selected or not self.drag_start or not self.drag_initial:
+            return
+        if self.scale <= 0:
+            return
+        if self.drag_mode == "move":
+            dx = (event.x - self.drag_start[0]) / self.scale
+            dy = (event.y - self.drag_start[1]) / self.scale
+            self.selected["x"] = self.drag_initial[0] + dx
+            self.selected["y"] = self.drag_initial[1] + dy
+            cx, cy = self._img_to_canvas(self.selected["x"], self.selected["y"])
+            self.coords(self.selected["item"], cx, cy)
+            self._draw_selection()
+        elif self.drag_mode == "resize":
+            dx = (event.x - self.drag_start[0]) / self.scale
+            orig_w, orig_h = self.drag_initial
+            ratio = orig_h / orig_w if orig_w else 1.0
+            new_w = max(8.0, orig_w + dx)
+            self.selected["w"] = new_w
+            self.selected["h"] = max(8.0, new_w * ratio)
+            self._refresh_layer(self.selected)
+            self._draw_selection()
+
+    def _on_release(self, _event: tk.Event) -> None:
+        self.drag_mode = None
+        self.drag_start = None
+        self.drag_initial = None
+
+
 class WindyImageTool(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Windy Image Tool")
-        self.geometry("860x640")
+        self.geometry("960x780")
         self.minsize(760, 560)
 
         self.output_dir = tk.StringVar(value=str(Path.cwd() / "output"))
@@ -360,8 +624,8 @@ class WindyImageTool(tk.Tk):
         self._resize_syncing = False
 
         self.compress_path = tk.StringVar()
-        self.use_target_size = tk.BooleanVar(value=False)
-        self.target_kb = tk.IntVar(value=500)
+        self.compress_percent = tk.IntVar(value=70)
+        self._compress_original_size = 0
 
         self.rotate_path = tk.StringVar()
         self.rotate_degrees = tk.IntVar(value=90)
@@ -374,6 +638,18 @@ class WindyImageTool(tk.Tk):
         self.hue_shift = tk.IntVar(value=0)
         self._hue_source: Image.Image | None = None
         self._hue_preview_job: str | None = None
+
+        self.meme_base_path = tk.StringVar()
+        self.meme_text = tk.StringVar(value="TEXT")
+        self.meme_font = tk.StringVar(value="Impact")
+        self.meme_font_size = tk.IntVar(value=48)
+        self.meme_fill = tk.StringVar(value="#ffffff")
+        self.meme_outline = tk.StringVar(value="#000000")
+        self.meme_outline_width = tk.IntVar(value=3)
+        self._meme_selected_type: str | None = None
+        self._meme_syncing = False
+        self._meme_text_window: tk.Toplevel | None = None
+        self.meme_hint: ttk.Label | None = None
 
         self.settings = load_settings()
         self.settings_font_size = tk.IntVar(value=self.settings["font_size"])
@@ -506,7 +782,11 @@ class WindyImageTool(tk.Tk):
 
         for panel in self._heavy_panels:
             panel["placeholder"].configure(bg=bg)
-        for widget in (getattr(self, "crop_canvas", None), getattr(self, "hue_preview", None)):
+        for widget in (
+            getattr(self, "crop_canvas", None),
+            getattr(self, "hue_preview", None),
+            getattr(self, "meme_canvas", None),
+        ):
             if widget is not None and hasattr(widget, "apply_theme"):
                 widget.apply_theme(bg, text)
         if not self._panels_hidden:
@@ -536,6 +816,7 @@ class WindyImageTool(tk.Tk):
         self._build_rotate_tab(notebook)
         self._build_flip_tab(notebook)
         self._build_hue_tab(notebook)
+        self._build_meme_tab(notebook)
 
         status_bar = ttk.Label(self, textvariable=self.status, style="Status.TLabel", padding=(12, 6))
         status_bar.pack(fill="x")
@@ -637,33 +918,33 @@ class WindyImageTool(tk.Tk):
         row.pack(fill="x", pady=(0, 10))
         ttk.Label(row, text="Image:").pack(side="left")
         ttk.Entry(row, textvariable=self.compress_path).pack(side="left", fill="x", expand=True, padx=8)
-        ttk.Button(row, text="Browse", command=lambda: self._pick_file(self.compress_path)).pack(side="left")
+        ttk.Button(row, text="Browse", command=self._load_compress_image).pack(side="left")
 
-        target_row = ttk.Frame(frame)
-        target_row.pack(fill="x", pady=(0, 16))
-        ttk.Checkbutton(
-            target_row,
-            text="Use target size (KB)",
-            variable=self.use_target_size,
-            command=self._toggle_target_size,
-        ).pack(side="left")
-        self.target_spin = ttk.Spinbox(
-            target_row,
-            from_=16,
-            to=50000,
-            textvariable=self.target_kb,
-            width=10,
-            state="disabled",
+        slider_row = ttk.Frame(frame)
+        slider_row.pack(fill="x", pady=(0, 10))
+        ttk.Label(slider_row, text="Target size:").pack(side="left")
+        self.compress_value_label = ttk.Label(slider_row, text="70%", width=5)
+        self.compress_value_label.pack(side="left", padx=(6, 8))
+        self.compress_scale = ttk.Scale(
+            slider_row,
+            from_=10,
+            to=90,
+            orient="horizontal",
+            command=self._on_compress_slider,
         )
-        self.target_spin.pack(side="left", padx=8)
+        self.compress_scale.pack(side="left", fill="x", expand=True)
+        self.compress_approx_label = ttk.Label(slider_row, text="\u2248 \u2014", width=14, anchor="e")
+        self.compress_approx_label.pack(side="left", padx=(8, 0))
 
         ttk.Label(
             frame,
-            text="Auto mode aims for roughly 70% of the original file size.",
+            text="Lower percentage means a smaller file at lower quality.",
             style="Muted.TLabel",
         ).pack(anchor="w", pady=(0, 16))
 
         ttk.Button(frame, text="Compress", command=self._run_compress).pack(anchor="w")
+
+        self.compress_scale.set(self.compress_percent.get())
 
     def _build_rotate_tab(self, notebook: ttk.Notebook) -> None:
         frame = ttk.Frame(notebook, padding=12)
@@ -773,6 +1054,48 @@ class WindyImageTool(tk.Tk):
         self.hue_value_label.pack(side="left")
 
         ttk.Button(frame, text="Export", command=self._run_hue).pack(anchor="w")
+
+    def _build_meme_tab(self, notebook: ttk.Notebook) -> None:
+        frame = ttk.Frame(notebook, padding=(12, 8))
+        notebook.add(frame, text="Meme")
+
+        row = ttk.Frame(frame)
+        row.pack(fill="x", pady=(0, 8))
+        ttk.Label(row, text="Base image:").pack(side="left")
+        ttk.Entry(row, textvariable=self.meme_base_path).pack(side="left", fill="x", expand=True, padx=8)
+        ttk.Button(row, text="Browse", command=self._load_meme_base).pack(side="left")
+
+        toolbar = ttk.Frame(frame)
+        toolbar.pack(fill="x", pady=(0, 8))
+        ttk.Button(toolbar, text="Add image", command=self._meme_add_image).pack(side="left")
+        ttk.Button(toolbar, text="Add text", command=self._meme_add_text).pack(side="left", padx=(8, 0))
+        self.meme_edit_btn = ttk.Button(toolbar, text="Edit text", command=self._open_meme_text_dialog, state="disabled")
+        self.meme_edit_btn.pack(side="left", padx=(8, 0))
+        ttk.Button(toolbar, text="Delete selected", command=self._meme_delete).pack(side="left", padx=(8, 0))
+
+        self.meme_canvas = MemeCanvas(
+            frame,
+            on_select=self._meme_on_select,
+            canvas_bg=self.settings["background_color"],
+            text_color=self.settings["text_color"],
+        )
+        meme_pack = {"fill": "both", "expand": True, "pady": (0, 8)}
+        self.meme_preview_placeholder = tk.Frame(frame, bg=self.settings["background_color"])
+        self.meme_preview_placeholder.pack_propagate(False)
+        self._register_heavy_panel("Meme", self.meme_canvas, self.meme_preview_placeholder, meme_pack)
+        self.meme_canvas.bind("<Double-Button-1>", self._meme_on_double_click)
+        self.meme_canvas.bind("<Configure>", self._sync_meme_placeholder_height, add="+")
+        self.meme_preview_placeholder.configure(height=480)
+
+        bottom = ttk.Frame(frame)
+        bottom.pack(fill="x")
+        self.meme_hint = ttk.Label(
+            bottom,
+            text="Add text or an image, then drag it on the base. Double-click text to edit.",
+            style="Muted.TLabel",
+        )
+        self.meme_hint.pack(side="left")
+        ttk.Button(bottom, text="Export meme", command=self._run_meme_export).pack(side="right")
 
     def _open_settings(self) -> None:
         if self._settings_window is not None and self._settings_window.winfo_exists():
@@ -898,9 +1221,36 @@ class WindyImageTool(tk.Tk):
         self.resize_w.set(width)
         self._resize_syncing = False
 
-    def _toggle_target_size(self) -> None:
-        state = "normal" if self.use_target_size.get() else "disabled"
-        self.target_spin.configure(state=state)
+    def _load_compress_image(self) -> None:
+        path = filedialog.askopenfilename(title="Select image", filetypes=IMAGE_TYPES)
+        if not path:
+            return
+        self.compress_path.set(path)
+        try:
+            self._compress_original_size = Path(path).stat().st_size
+        except OSError:
+            self._compress_original_size = 0
+        self._update_compress_approx()
+
+    def _on_compress_slider(self, value: str) -> None:
+        percent = int(round(float(value)))
+        self.compress_percent.set(percent)
+        self.compress_value_label.configure(text=f"{percent}%")
+        self._update_compress_approx()
+
+    @staticmethod
+    def _format_size(num_bytes: float) -> str:
+        kb = num_bytes / 1024
+        if kb >= 1024:
+            return f"{kb / 1024:.1f} MB"
+        return f"{kb:.0f} KB"
+
+    def _update_compress_approx(self) -> None:
+        if self._compress_original_size <= 0:
+            self.compress_approx_label.configure(text="\u2248 \u2014")
+            return
+        approx = self._compress_original_size * self.compress_percent.get() / 100
+        self.compress_approx_label.configure(text="\u2248 " + self._format_size(approx))
 
     def _load_hue_image(self) -> None:
         path = filedialog.askopenfilename(title="Select image", filetypes=IMAGE_TYPES)
@@ -930,6 +1280,231 @@ class WindyImageTool(tk.Tk):
             return
         preview = shift_hue(self._hue_source, degrees)
         self.hue_preview.set_image(preview)
+
+    def _load_meme_base(self) -> None:
+        path = filedialog.askopenfilename(title="Select base image", filetypes=IMAGE_TYPES)
+        if not path:
+            return
+        try:
+            image = load_image(path)
+        except Exception as exc:
+            messagebox.showerror("Load failed", str(exc))
+            return
+        self.meme_base_path.set(path)
+        self.meme_canvas.set_base(image)
+        self._sync_visible_heavy_panels(force_redraw=True)
+        self.status.set("Base image loaded")
+
+    def _meme_add_image(self) -> None:
+        if self.meme_canvas.base_image is None:
+            messagebox.showwarning("No base image", "Load a base image first.")
+            return
+        path = filedialog.askopenfilename(title="Select image to add", filetypes=IMAGE_TYPES)
+        if not path:
+            return
+        try:
+            image = load_image(path)
+        except Exception as exc:
+            messagebox.showerror("Load failed", str(exc))
+            return
+        self.meme_canvas.add_image_layer(image)
+        self.status.set("Image layer added")
+
+    def _meme_add_text(self) -> None:
+        if self.meme_canvas.base_image is None:
+            messagebox.showwarning("No base image", "Load a base image first.")
+            return
+        self.meme_canvas.add_text_layer(
+            text="TEXT",
+            font=self.meme_font.get(),
+            fill=self.meme_fill.get(),
+            outline=self.meme_outline.get(),
+        )
+        self.status.set("Text layer added")
+        self._open_meme_text_dialog()
+
+    def _meme_delete(self) -> None:
+        self.meme_canvas.delete_selected()
+
+    def _sync_meme_placeholder_height(self, event: tk.Event | None = None) -> None:
+        if event is not None and event.widget is not self.meme_canvas:
+            return
+        height = max(self.meme_canvas.winfo_height(), 1)
+        if height > 1:
+            self.meme_preview_placeholder.configure(height=height)
+
+    def _meme_on_double_click(self, event: tk.Event) -> None:
+        if self.meme_canvas.base_image is None:
+            return
+        layer = self.meme_canvas._layer_at(event.x, event.y)
+        if layer is None or layer["type"] != "text":
+            return
+        if self.meme_canvas.selected is not layer:
+            self.meme_canvas.selected = layer
+            self._meme_on_select(layer)
+        self._open_meme_text_dialog()
+
+    def _open_meme_text_dialog(self) -> None:
+        if self._meme_selected_type != "text" or self.meme_canvas.selected is None:
+            return
+        if self._meme_text_window is not None and self._meme_text_window.winfo_exists():
+            self._meme_text_window.lift()
+            self._meme_text_window.focus_force()
+            return
+
+        layer = self.meme_canvas.selected
+        self._meme_syncing = True
+        self.meme_text.set(layer["text"])
+        self.meme_font.set(layer["font"])
+        self.meme_font_size.set(int(round(layer["size"])))
+        self.meme_fill.set(layer["fill"])
+        self.meme_outline.set(layer["outline"])
+        self.meme_outline_width.set(int(round(layer["outline_width"])))
+        self._meme_syncing = False
+
+        window = tk.Toplevel(self)
+        window.title("Edit text")
+        window.transient(self)
+        window.resizable(False, False)
+        self._meme_text_window = window
+
+        frame = ttk.Frame(window, padding=16)
+        frame.pack(fill="both", expand=True)
+
+        line1 = ttk.Frame(frame)
+        line1.pack(fill="x", pady=(0, 10))
+        ttk.Label(line1, text="Text:").pack(side="left")
+        text_entry = ttk.Entry(line1, textvariable=self.meme_text, width=36)
+        text_entry.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        text_entry.bind("<KeyRelease>", lambda _e: self._meme_apply_text())
+        text_entry.focus_set()
+        text_entry.selection_range(0, tk.END)
+
+        line2 = ttk.Frame(frame)
+        line2.pack(fill="x", pady=(0, 10))
+        ttk.Label(line2, text="Font:").pack(side="left")
+        font_combo = ttk.Combobox(
+            line2,
+            textvariable=self.meme_font,
+            values=list(MEME_FONTS.keys()),
+            state="readonly",
+            width=18,
+        )
+        font_combo.pack(side="left", padx=(8, 16))
+        font_combo.bind("<<ComboboxSelected>>", lambda _e: self._meme_apply_text())
+
+        ttk.Label(line2, text="Size:").pack(side="left")
+        size_spin = ttk.Spinbox(line2, from_=6, to=400, textvariable=self.meme_font_size, width=6, command=self._meme_apply_text)
+        size_spin.pack(side="left", padx=(8, 16))
+        size_spin.bind("<KeyRelease>", lambda _e: self._meme_apply_text())
+
+        ttk.Label(line2, text="Outline:").pack(side="left")
+        outline_spin = ttk.Spinbox(line2, from_=0, to=40, textvariable=self.meme_outline_width, width=5, command=self._meme_apply_text)
+        outline_spin.pack(side="left", padx=(8, 0))
+        outline_spin.bind("<KeyRelease>", lambda _e: self._meme_apply_text())
+
+        line3 = ttk.Frame(frame)
+        line3.pack(fill="x", pady=(0, 16))
+        ttk.Label(line3, text="Fill color:").pack(side="left")
+        fill_color_entry = ttk.Entry(line3, textvariable=self.meme_fill, width=10)
+        fill_color_entry.pack(side="left", padx=(8, 6))
+        fill_swatch = tk.Label(line3, width=3, relief="solid", bg=self.meme_fill.get())
+        fill_swatch.pack(side="left", padx=(0, 6))
+        ttk.Button(line3, text="Pick", width=5, command=lambda: self._choose_meme_fill(fill_swatch)).pack(side="left", padx=(0, 16))
+
+        ttk.Label(line3, text="Outline color:").pack(side="left")
+        outline_color_entry = ttk.Entry(line3, textvariable=self.meme_outline, width=10)
+        outline_color_entry.pack(side="left", padx=(8, 6))
+        outline_swatch = tk.Label(line3, width=3, relief="solid", bg=self.meme_outline.get())
+        outline_swatch.pack(side="left", padx=(0, 6))
+        ttk.Button(line3, text="Pick", width=5, command=lambda: self._choose_meme_outline(outline_swatch)).pack(side="left")
+
+        def _sync_fill_swatch(_event=None) -> None:
+            if is_valid_color(self.meme_fill.get()):
+                fill_swatch.configure(bg=self.meme_fill.get())
+            self._meme_apply_text()
+
+        def _sync_outline_swatch(_event=None) -> None:
+            if is_valid_color(self.meme_outline.get()):
+                outline_swatch.configure(bg=self.meme_outline.get())
+            self._meme_apply_text()
+
+        fill_color_entry.bind("<KeyRelease>", _sync_fill_swatch)
+        outline_color_entry.bind("<KeyRelease>", _sync_outline_swatch)
+
+        ttk.Button(frame, text="Close", command=lambda: self._close_meme_text_dialog(window)).pack(anchor="e")
+        window.protocol("WM_DELETE_WINDOW", lambda: self._close_meme_text_dialog(window))
+
+    def _close_meme_text_dialog(self, window: tk.Toplevel) -> None:
+        window.destroy()
+        self._meme_text_window = None
+
+    def _meme_on_select(self, layer: dict | None) -> None:
+        self._meme_syncing = True
+        if layer is None:
+            self._meme_selected_type = None
+        elif layer["type"] == "text":
+            self._meme_selected_type = "text"
+            self.meme_text.set(layer["text"])
+            self.meme_font.set(layer["font"])
+            self.meme_font_size.set(int(round(layer["size"])))
+            self.meme_fill.set(layer["fill"])
+            self.meme_outline.set(layer["outline"])
+            self.meme_outline_width.set(int(round(layer["outline_width"])))
+        else:
+            self._meme_selected_type = "image"
+        self._meme_syncing = False
+        self._update_meme_panel_state()
+
+    def _update_meme_panel_state(self) -> None:
+        if hasattr(self, "meme_edit_btn"):
+            state = "normal" if self._meme_selected_type == "text" else "disabled"
+            self.meme_edit_btn.configure(state=state)
+        if self.meme_hint is None:
+            return
+        if self._meme_selected_type == "text":
+            self.meme_hint.configure(text="Text selected. Drag to move, or use Edit text / double-click to edit.")
+        elif self._meme_selected_type == "image":
+            self.meme_hint.configure(text="Image selected. Drag to move, drag the corner to resize.")
+        else:
+            self.meme_hint.configure(text="Add text or an image, then drag it on the base. Double-click text to edit.")
+
+    def _meme_apply_text(self) -> None:
+        if self._meme_syncing or self._meme_selected_type != "text":
+            return
+        try:
+            size = max(1, int(self.meme_font_size.get()))
+            outline_width = max(0, int(self.meme_outline_width.get()))
+        except tk.TclError:
+            return
+        fill = self.meme_fill.get().strip() or "#ffffff"
+        outline = self.meme_outline.get().strip() or "#000000"
+        if not is_valid_color(fill) or not is_valid_color(outline):
+            return
+        self.meme_canvas.update_selected(
+            text=self.meme_text.get(),
+            font=self.meme_font.get(),
+            size=size,
+            fill=fill,
+            outline=outline,
+            outline_width=outline_width,
+        )
+
+    def _choose_meme_fill(self, swatch: tk.Label | None = None) -> None:
+        chosen = colorchooser.askcolor(color=self.meme_fill.get(), title="Text fill color")
+        if chosen[1]:
+            self.meme_fill.set(chosen[1])
+            if swatch is not None:
+                swatch.configure(bg=chosen[1])
+            self._meme_apply_text()
+
+    def _choose_meme_outline(self, swatch: tk.Label | None = None) -> None:
+        chosen = colorchooser.askcolor(color=self.meme_outline.get(), title="Text outline color")
+        if chosen[1]:
+            self.meme_outline.set(chosen[1])
+            if swatch is not None:
+                swatch.configure(bg=chosen[1])
+            self._meme_apply_text()
 
     def _choose_background_color(self) -> None:
         chosen = colorchooser.askcolor(
@@ -1049,8 +1624,9 @@ class WindyImageTool(tk.Tk):
         if not source:
             return
         try:
-            target = self.target_kb.get() if self.use_target_size.get() else None
-            output, size = compress_image(source, self.output_dir.get(), target_kb=target)
+            original = source.stat().st_size
+            target_kb = max(1, int(original * self.compress_percent.get() / 100 / 1024))
+            output, size = compress_image(source, self.output_dir.get(), target_kb=target_kb)
             kb = size / 1024
             self.status.set(f"Compressed to {output.name} ({kb:.1f} KB)")
             messagebox.showinfo("Done", f"Saved to:\n{output}\n\nSize: {kb:.1f} KB")
@@ -1094,6 +1670,23 @@ class WindyImageTool(tk.Tk):
             messagebox.showinfo("Done", f"Saved to:\n{output}")
         except Exception as exc:
             messagebox.showerror("Hue adjust failed", str(exc))
+
+    def _run_meme_export(self) -> None:
+        base_path = self.meme_base_path.get()
+        if not base_path or self.meme_canvas.base_image is None:
+            messagebox.showwarning("No base image", "Load a base image first.")
+            return
+        try:
+            output = export_meme(
+                base_path,
+                self.output_dir.get(),
+                self.meme_canvas.layers,
+                base_image=self.meme_canvas.base_image,
+            )
+            self.status.set(f"Meme exported to {output.name}")
+            messagebox.showinfo("Done", f"Saved to:\n{output}")
+        except Exception as exc:
+            messagebox.showerror("Export failed", str(exc))
 
 
 def run() -> None:

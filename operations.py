@@ -4,7 +4,17 @@ import io
 import os
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
+
+MEME_FONTS = {
+    "Impact": "impact.ttf",
+    "Arial": "arial.ttf",
+    "Arial Bold": "arialbd.ttf",
+    "Comic Sans MS": "comic.ttf",
+    "Times New Roman": "times.ttf",
+    "Courier New": "cour.ttf",
+    "Verdana": "verdana.ttf",
+}
 
 FORMAT_EXTENSIONS = {
     "JPEG": ".jpg",
@@ -277,3 +287,107 @@ def compress_image(
     destination = unique_output_path(output_path, f"{source.stem}_compressed", suffix)
     destination.write_bytes(best_data)
     return destination, len(best_data)
+
+
+def resolve_meme_font(family: str, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    size = max(1, int(size))
+    candidates = [MEME_FONTS.get(family, family), family]
+    for name in candidates:
+        if not name:
+            continue
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    for fallback in ("arial.ttf", "DejaVuSans.ttf"):
+        try:
+            return ImageFont.truetype(fallback, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def render_meme_text(
+    text: str,
+    font_family: str,
+    font_size: float,
+    fill: str,
+    outline: str,
+    outline_width: float,
+) -> Image.Image:
+    """Render a text label (with outline) onto a transparent image.
+
+    The returned image's top-left corner is the anchor used for positioning,
+    so the editor preview and the exported result stay pixel-aligned.
+    """
+    font = resolve_meme_font(font_family, int(round(font_size)))
+    stroke = max(0, int(round(outline_width)))
+    content = text if text else " "
+
+    measure = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    bbox = measure.multiline_textbbox((0, 0), content, font=font, stroke_width=stroke, align="center")
+    pad = stroke + 4
+    width = max(1, bbox[2] - bbox[0]) + 2 * pad
+    height = max(1, bbox[3] - bbox[1]) + 2 * pad
+
+    image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.multiline_text(
+        (pad - bbox[0], pad - bbox[1]),
+        content,
+        font=font,
+        fill=fill,
+        stroke_width=stroke,
+        stroke_fill=outline,
+        align="center",
+    )
+    return image
+
+
+def compose_meme(base: Image.Image, layers: list[dict]) -> Image.Image:
+    canvas = base.convert("RGBA").copy()
+    for layer in layers:
+        if layer["type"] == "image":
+            width = max(1, int(round(layer["w"])))
+            height = max(1, int(round(layer["h"])))
+            overlay = layer["image"].convert("RGBA").resize((width, height), Image.Resampling.LANCZOS)
+            canvas.alpha_composite(overlay, (int(round(layer["x"])), int(round(layer["y"]))))
+        else:
+            text_img = render_meme_text(
+                layer["text"],
+                layer["font"],
+                layer["size"],
+                layer["fill"],
+                layer["outline"],
+                layer["outline_width"],
+            )
+            canvas.alpha_composite(text_img, (int(round(layer["x"])), int(round(layer["y"]))))
+    return canvas
+
+
+def export_meme(
+    base_path: str | Path,
+    output_dir: str | Path,
+    layers: list[dict],
+    base_image: Image.Image | None = None,
+) -> Path:
+    base = base_image if base_image is not None else load_image(base_path)
+    composed = compose_meme(base, layers)
+
+    output_path = ensure_output_dir(output_dir)
+    suffix = Path(base_path).suffix.lower() or ".png"
+    if suffix in {".jpg", ".jpeg"}:
+        fmt = "JPEG"
+        composed = composed.convert("RGB")
+    elif suffix == ".bmp":
+        fmt = "BMP"
+        composed = composed.convert("RGB")
+    elif suffix == ".webp":
+        fmt = "WEBP"
+    else:
+        suffix = ".png"
+        fmt = "PNG"
+
+    destination = unique_output_path(output_path, f"{Path(base_path).stem}_meme", suffix)
+    save_image(composed, destination, fmt)
+    return destination
