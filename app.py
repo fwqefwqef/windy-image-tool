@@ -17,10 +17,12 @@ from operations import (
     export_meme,
     flip_image,
     load_image,
+    make_white_transparent,
     render_meme_text,
     resize_image,
     rotate_image,
     shift_hue,
+    transparent_white_image,
 )
 from settings import DEFAULT_SETTINGS, dim_color, is_valid_color, load_settings, save_settings
 
@@ -607,9 +609,11 @@ class WindyImageTool(tk.Tk):
         self.status = tk.StringVar(value="Ready")
 
         self.convert_path = tk.StringVar()
+        self.convert_paths: list[Path] = []
         self.convert_format = tk.StringVar(value="PNG")
 
         self.crop_path = tk.StringVar()
+        self.crop_paths: list[Path] = []
         self.crop_x = tk.IntVar(value=0)
         self.crop_y = tk.IntVar(value=0)
         self.crop_w = tk.IntVar(value=1)
@@ -617,6 +621,7 @@ class WindyImageTool(tk.Tk):
         self._crop_syncing = False
 
         self.resize_path = tk.StringVar()
+        self.resize_paths: list[Path] = []
         self.resize_w = tk.IntVar(value=800)
         self.resize_h = tk.IntVar(value=600)
         self.preserve_aspect = tk.BooleanVar(value=True)
@@ -624,20 +629,28 @@ class WindyImageTool(tk.Tk):
         self._resize_syncing = False
 
         self.compress_path = tk.StringVar()
+        self.compress_paths: list[Path] = []
         self.compress_percent = tk.IntVar(value=70)
         self._compress_original_size = 0
 
         self.rotate_path = tk.StringVar()
+        self.rotate_paths: list[Path] = []
         self.rotate_degrees = tk.IntVar(value=90)
         self.rotate_direction = tk.StringVar(value="right")
 
         self.flip_path = tk.StringVar()
+        self.flip_paths: list[Path] = []
         self.flip_axis = tk.StringVar(value="horizontal")
 
         self.hue_path = tk.StringVar()
+        self.hue_paths: list[Path] = []
         self.hue_shift = tk.IntVar(value=0)
         self._hue_source: Image.Image | None = None
         self._hue_preview_job: str | None = None
+
+        self.transparent_path = tk.StringVar()
+        self.transparent_paths: list[Path] = []
+        self._transparent_source: Image.Image | None = None
 
         self.meme_base_path = tk.StringVar()
         self.meme_text = tk.StringVar(value="TEXT")
@@ -785,6 +798,7 @@ class WindyImageTool(tk.Tk):
         for widget in (
             getattr(self, "crop_canvas", None),
             getattr(self, "hue_preview", None),
+            getattr(self, "transparent_preview", None),
             getattr(self, "meme_canvas", None),
         ):
             if widget is not None and hasattr(widget, "apply_theme"):
@@ -816,6 +830,7 @@ class WindyImageTool(tk.Tk):
         self._build_rotate_tab(notebook)
         self._build_flip_tab(notebook)
         self._build_hue_tab(notebook)
+        self._build_transparent_tab(notebook)
         self._build_meme_tab(notebook)
 
         status_bar = ttk.Label(self, textvariable=self.status, style="Status.TLabel", padding=(12, 6))
@@ -828,9 +843,9 @@ class WindyImageTool(tk.Tk):
 
         row = ttk.Frame(frame)
         row.pack(fill="x", pady=(0, 10))
-        ttk.Label(row, text="Image:").pack(side="left")
+        ttk.Label(row, text="Images:").pack(side="left")
         ttk.Entry(row, textvariable=self.convert_path).pack(side="left", fill="x", expand=True, padx=8)
-        ttk.Button(row, text="Browse", command=lambda: self._pick_file(self.convert_path)).pack(side="left")
+        ttk.Button(row, text="Browse", command=lambda: self._pick_files(self.convert_path, self.convert_paths)).pack(side="left")
 
         format_row = ttk.Frame(frame)
         format_row.pack(fill="x", pady=(0, 16))
@@ -851,7 +866,7 @@ class WindyImageTool(tk.Tk):
 
         row = ttk.Frame(frame)
         row.pack(fill="x", pady=(0, 10))
-        ttk.Label(row, text="Image:").pack(side="left")
+        ttk.Label(row, text="Images:").pack(side="left")
         ttk.Entry(row, textvariable=self.crop_path).pack(side="left", fill="x", expand=True, padx=8)
         ttk.Button(row, text="Browse", command=self._load_crop_image).pack(side="left")
 
@@ -865,6 +880,12 @@ class WindyImageTool(tk.Tk):
         crop_pack = {"fill": "both", "expand": True, "pady": (0, 10)}
         self.crop_preview_placeholder = tk.Frame(frame, bg=self.settings["background_color"], height=360)
         self._register_heavy_panel("Crop", self.crop_canvas, self.crop_preview_placeholder, crop_pack)
+
+        ttk.Label(
+            frame,
+            text="The first selected image is previewed; the same crop bounds are applied to the full batch.",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(0, 8))
 
         bounds = ttk.Frame(frame)
         bounds.pack(fill="x", pady=(0, 10))
@@ -884,7 +905,7 @@ class WindyImageTool(tk.Tk):
 
         row = ttk.Frame(frame)
         row.pack(fill="x", pady=(0, 10))
-        ttk.Label(row, text="Image:").pack(side="left")
+        ttk.Label(row, text="Images:").pack(side="left")
         ttk.Entry(row, textvariable=self.resize_path).pack(side="left", fill="x", expand=True, padx=8)
         ttk.Button(row, text="Browse", command=self._load_resize_image).pack(side="left")
 
@@ -908,6 +929,12 @@ class WindyImageTool(tk.Tk):
             variable=self.preserve_aspect,
         ).pack(anchor="w", pady=(0, 16))
 
+        ttk.Label(
+            frame,
+            text="Size starts from the first selected image and is applied to the full batch.",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(0, 12))
+
         ttk.Button(frame, text="Resize", command=self._run_resize).pack(anchor="w")
 
     def _build_compress_tab(self, notebook: ttk.Notebook) -> None:
@@ -916,7 +943,7 @@ class WindyImageTool(tk.Tk):
 
         row = ttk.Frame(frame)
         row.pack(fill="x", pady=(0, 10))
-        ttk.Label(row, text="Image:").pack(side="left")
+        ttk.Label(row, text="Images:").pack(side="left")
         ttk.Entry(row, textvariable=self.compress_path).pack(side="left", fill="x", expand=True, padx=8)
         ttk.Button(row, text="Browse", command=self._load_compress_image).pack(side="left")
 
@@ -952,9 +979,9 @@ class WindyImageTool(tk.Tk):
 
         row = ttk.Frame(frame)
         row.pack(fill="x", pady=(0, 10))
-        ttk.Label(row, text="Image:").pack(side="left")
+        ttk.Label(row, text="Images:").pack(side="left")
         ttk.Entry(row, textvariable=self.rotate_path).pack(side="left", fill="x", expand=True, padx=8)
-        ttk.Button(row, text="Browse", command=lambda: self._pick_file(self.rotate_path)).pack(side="left")
+        ttk.Button(row, text="Browse", command=lambda: self._pick_files(self.rotate_path, self.rotate_paths)).pack(side="left")
 
         angle_row = ttk.Frame(frame)
         angle_row.pack(fill="x", pady=(0, 10))
@@ -996,9 +1023,9 @@ class WindyImageTool(tk.Tk):
 
         row = ttk.Frame(frame)
         row.pack(fill="x", pady=(0, 10))
-        ttk.Label(row, text="Image:").pack(side="left")
+        ttk.Label(row, text="Images:").pack(side="left")
         ttk.Entry(row, textvariable=self.flip_path).pack(side="left", fill="x", expand=True, padx=8)
-        ttk.Button(row, text="Browse", command=lambda: self._pick_file(self.flip_path)).pack(side="left")
+        ttk.Button(row, text="Browse", command=lambda: self._pick_files(self.flip_path, self.flip_paths)).pack(side="left")
 
         axis_row = ttk.Frame(frame)
         axis_row.pack(fill="x", pady=(0, 16))
@@ -1024,7 +1051,7 @@ class WindyImageTool(tk.Tk):
 
         row = ttk.Frame(frame)
         row.pack(fill="x", pady=(0, 10))
-        ttk.Label(row, text="Image:").pack(side="left")
+        ttk.Label(row, text="Images:").pack(side="left")
         ttk.Entry(row, textvariable=self.hue_path).pack(side="left", fill="x", expand=True, padx=8)
         ttk.Button(row, text="Browse", command=self._load_hue_image).pack(side="left")
 
@@ -1054,6 +1081,35 @@ class WindyImageTool(tk.Tk):
         self.hue_value_label.pack(side="left")
 
         ttk.Button(frame, text="Export", command=self._run_hue).pack(anchor="w")
+
+    def _build_transparent_tab(self, notebook: ttk.Notebook) -> None:
+        frame = ttk.Frame(notebook, padding=12)
+        notebook.add(frame, text="Transparent")
+
+        row = ttk.Frame(frame)
+        row.pack(fill="x", pady=(0, 10))
+        ttk.Label(row, text="Images:").pack(side="left")
+        ttk.Entry(row, textvariable=self.transparent_path).pack(side="left", fill="x", expand=True, padx=8)
+        ttk.Button(row, text="Browse", command=self._load_transparent_image).pack(side="left")
+
+        self.transparent_preview = ImagePreviewLabel(
+            frame,
+            placeholder="Load an image to preview transparency",
+            canvas_bg=self.settings["background_color"],
+            text_color=self.settings["text_color"],
+            height=320,
+        )
+        transparent_pack = {"fill": "both", "expand": True, "pady": (0, 10)}
+        self.transparent_preview_placeholder = tk.Frame(frame, bg=self.settings["background_color"], height=320)
+        self._register_heavy_panel("Transparent", self.transparent_preview, self.transparent_preview_placeholder, transparent_pack)
+
+        ttk.Label(
+            frame,
+            text="Near-white pixels (RGB all ≥ 242, within 10 of 252, 252, 252) become transparent. Output is saved as PNG.",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(0, 16))
+
+        ttk.Button(frame, text="Export", command=self._run_transparent).pack(anchor="w")
 
     def _build_meme_tab(self, notebook: ttk.Notebook) -> None:
         frame = ttk.Frame(notebook, padding=(12, 8))
@@ -1160,26 +1216,65 @@ class WindyImageTool(tk.Tk):
         if folder:
             self.output_dir.set(folder)
 
-    def _pick_file(self, var: tk.StringVar) -> None:
-        path = filedialog.askopenfilename(title="Select image", filetypes=IMAGE_TYPES)
-        if path:
-            var.set(path)
+    @staticmethod
+    def _selection_text(paths: list[Path]) -> str:
+        if not paths:
+            return ""
+        if len(paths) == 1:
+            return str(paths[0])
+        return f"{len(paths)} images selected (first: {paths[0].name})"
+
+    def _pick_files(self, var: tk.StringVar, selected: list[Path], title: str = "Select images") -> list[Path]:
+        paths = [Path(path) for path in filedialog.askopenfilenames(title=title, filetypes=IMAGE_TYPES)]
+        if paths:
+            selected.clear()
+            selected.extend(paths)
+            var.set(self._selection_text(selected))
+            self.status.set(f"Selected {len(paths)} image{'s' if len(paths) != 1 else ''}")
+        return paths
+
+    def _first_loadable_image(self, paths: list[Path]) -> Image.Image | None:
+        failures: list[str] = []
+        for path in paths:
+            try:
+                image = load_image(path)
+                if failures:
+                    shown = failures[:8]
+                    skipped = len(failures) - len(shown)
+                    failure_text = "\n".join(shown)
+                    if skipped:
+                        failure_text += f"\n...and {skipped} more"
+                    messagebox.showwarning(
+                        "Preview skipped an image",
+                        "Could not preview:\n" + failure_text + f"\n\nShowing {path.name} instead.",
+                    )
+                return image
+            except Exception as exc:
+                failures.append(f"{path.name}: {exc}")
+        if failures:
+            shown = "\n".join(failures[:8])
+            if len(failures) > 8:
+                shown += f"\n...and {len(failures) - 8} more"
+            messagebox.showerror("Preview failed", "None of the selected images could be loaded:\n\n" + shown)
+        return None
 
     def _load_crop_image(self) -> None:
-        path = filedialog.askopenfilename(title="Select image", filetypes=IMAGE_TYPES)
-        if not path:
+        paths = self._pick_files(self.crop_path, self.crop_paths)
+        if not paths:
             return
-        self.crop_path.set(path)
-        image = load_image(path)
+        image = self._first_loadable_image(paths)
+        if image is None:
+            return
         self.crop_canvas.set_image(image)
         self._sync_visible_heavy_panels(force_redraw=True)
 
     def _load_resize_image(self) -> None:
-        path = filedialog.askopenfilename(title="Select image", filetypes=IMAGE_TYPES)
-        if not path:
+        paths = self._pick_files(self.resize_path, self.resize_paths)
+        if not paths:
             return
-        self.resize_path.set(path)
-        image = load_image(path)
+        image = self._first_loadable_image(paths)
+        if image is None:
+            return
         self._aspect_ratio = image.width / image.height if image.height else 1.0
         self._resize_syncing = True
         self.resize_w.set(image.width)
@@ -1222,12 +1317,11 @@ class WindyImageTool(tk.Tk):
         self._resize_syncing = False
 
     def _load_compress_image(self) -> None:
-        path = filedialog.askopenfilename(title="Select image", filetypes=IMAGE_TYPES)
-        if not path:
+        paths = self._pick_files(self.compress_path, self.compress_paths)
+        if not paths:
             return
-        self.compress_path.set(path)
         try:
-            self._compress_original_size = Path(path).stat().st_size
+            self._compress_original_size = sum(path.stat().st_size for path in paths)
         except OSError:
             self._compress_original_size = 0
         self._update_compress_approx()
@@ -1253,11 +1347,12 @@ class WindyImageTool(tk.Tk):
         self.compress_approx_label.configure(text="\u2248 " + self._format_size(approx))
 
     def _load_hue_image(self) -> None:
-        path = filedialog.askopenfilename(title="Select image", filetypes=IMAGE_TYPES)
-        if not path:
+        paths = self._pick_files(self.hue_path, self.hue_paths)
+        if not paths:
             return
-        self.hue_path.set(path)
-        self._hue_source = load_image(path)
+        self._hue_source = self._first_loadable_image(paths)
+        if self._hue_source is None:
+            return
         self.hue_shift.set(0)
         self.hue_slider.set(0)
         self.hue_value_label.configure(text="0°")
@@ -1281,6 +1376,17 @@ class WindyImageTool(tk.Tk):
         preview = shift_hue(self._hue_source, degrees)
         self.hue_preview.set_image(preview)
 
+    def _load_transparent_image(self) -> None:
+        paths = self._pick_files(self.transparent_path, self.transparent_paths)
+        if not paths:
+            return
+        self._transparent_source = self._first_loadable_image(paths)
+        if self._transparent_source is None:
+            return
+        preview = make_white_transparent(self._transparent_source)
+        self.transparent_preview.set_image(preview)
+        self._sync_visible_heavy_panels(force_redraw=True)
+
     def _load_meme_base(self) -> None:
         path = filedialog.askopenfilename(title="Select base image", filetypes=IMAGE_TYPES)
         if not path:
@@ -1299,16 +1405,20 @@ class WindyImageTool(tk.Tk):
         if self.meme_canvas.base_image is None:
             messagebox.showwarning("No base image", "Load a base image first.")
             return
-        path = filedialog.askopenfilename(title="Select image to add", filetypes=IMAGE_TYPES)
-        if not path:
+        paths = filedialog.askopenfilenames(title="Select images to add", filetypes=IMAGE_TYPES)
+        if not paths:
             return
-        try:
-            image = load_image(path)
-        except Exception as exc:
-            messagebox.showerror("Load failed", str(exc))
-            return
-        self.meme_canvas.add_image_layer(image)
-        self.status.set("Image layer added")
+        added = 0
+        failures: list[str] = []
+        for path in paths:
+            try:
+                self.meme_canvas.add_image_layer(load_image(path))
+                added += 1
+            except Exception as exc:
+                failures.append(f"{Path(path).name}: {exc}")
+        self.status.set(f"Added {added} image layer{'s' if added != 1 else ''}")
+        if failures:
+            messagebox.showwarning("Some images were not added", "\n".join(failures))
 
     def _meme_add_text(self) -> None:
         if self.meme_canvas.base_image is None:
@@ -1564,112 +1674,152 @@ class WindyImageTool(tk.Tk):
         self._apply_appearance()
         self.status.set("Settings reset to defaults")
 
-    def _validate_source(self, path: str) -> Path | None:
-        if not path:
-            messagebox.showwarning("Missing image", "Please select an image first.")
-            return None
-        source = Path(path)
-        if not source.is_file():
-            messagebox.showerror("Invalid file", "The selected image could not be found.")
-            return None
-        return source
+    def _validate_sources(self, var: tk.StringVar, selected: list[Path]) -> list[Path]:
+        value = var.get().strip()
+        if selected and value == self._selection_text(selected):
+            sources = list(selected)
+        elif value:
+            # Keep the entry useful for people who paste a single path manually.
+            sources = [Path(value)]
+        else:
+            messagebox.showwarning("Missing images", "Please select one or more images first.")
+            return []
+
+        return sources
+
+    def _run_batch(self, action: str, sources: list[Path], operation) -> list[Path]:
+        outputs: list[Path] = []
+        failures: list[str] = []
+        total = len(sources)
+        for index, source in enumerate(sources, start=1):
+            self.status.set(f"{action} {index} of {total}: {source.name}")
+            self.update_idletasks()
+            try:
+                result = operation(source)
+                output = result[0] if isinstance(result, tuple) else result
+                outputs.append(Path(output))
+            except Exception as exc:
+                failures.append(f"{source.name}: {exc}")
+
+        summary = f"Saved {len(outputs)} of {total} image{'s' if total != 1 else ''}"
+        self.status.set(f"{action} complete: {summary.lower()}")
+        output_lines = "\n".join(str(path) for path in outputs[:8])
+        if len(outputs) > 8:
+            output_lines += f"\n...and {len(outputs) - 8} more"
+        details = summary
+        if output_lines:
+            details += f"\n\n{output_lines}"
+        if failures:
+            failure_lines = "\n".join(failures[:8])
+            if len(failures) > 8:
+                failure_lines += f"\n...and {len(failures) - 8} more"
+            details += f"\n\nFailed ({len(failures)}):\n{failure_lines}"
+            if outputs:
+                messagebox.showwarning(f"{action} finished with errors", details)
+            else:
+                messagebox.showerror(f"{action} failed", details)
+        else:
+            messagebox.showinfo(f"{action} complete", details)
+        return outputs
 
     def _run_convert(self) -> None:
-        source = self._validate_source(self.convert_path.get())
-        if not source:
+        sources = self._validate_sources(self.convert_path, self.convert_paths)
+        if not sources:
             return
-        try:
-            output = convert_image(source, self.output_dir.get(), self.convert_format.get())
-            self.status.set(f"Converted to {output.name}")
-            messagebox.showinfo("Done", f"Saved to:\n{output}")
-        except Exception as exc:
-            messagebox.showerror("Convert failed", str(exc))
+        self._run_batch(
+            "Convert",
+            sources,
+            lambda source: convert_image(source, self.output_dir.get(), self.convert_format.get()),
+        )
 
     def _run_crop(self) -> None:
-        source = self._validate_source(self.crop_path.get())
-        if not source:
+        sources = self._validate_sources(self.crop_path, self.crop_paths)
+        if not sources:
             return
-        try:
-            output = crop_image(
+        self._run_batch(
+            "Crop",
+            sources,
+            lambda source: crop_image(
                 source,
                 self.output_dir.get(),
                 self.crop_x.get(),
                 self.crop_y.get(),
                 self.crop_w.get(),
                 self.crop_h.get(),
-            )
-            self.status.set(f"Cropped to {output.name}")
-            messagebox.showinfo("Done", f"Saved to:\n{output}")
-        except Exception as exc:
-            messagebox.showerror("Crop failed", str(exc))
+            ),
+        )
 
     def _run_resize(self) -> None:
-        source = self._validate_source(self.resize_path.get())
-        if not source:
+        sources = self._validate_sources(self.resize_path, self.resize_paths)
+        if not sources:
             return
-        try:
-            output = resize_image(
+        self._run_batch(
+            "Resize",
+            sources,
+            lambda source: resize_image(
                 source,
                 self.output_dir.get(),
                 self.resize_w.get(),
                 self.resize_h.get(),
-            )
-            self.status.set(f"Resized to {output.name}")
-            messagebox.showinfo("Done", f"Saved to:\n{output}")
-        except Exception as exc:
-            messagebox.showerror("Resize failed", str(exc))
+            ),
+        )
 
     def _run_compress(self) -> None:
-        source = self._validate_source(self.compress_path.get())
-        if not source:
+        sources = self._validate_sources(self.compress_path, self.compress_paths)
+        if not sources:
             return
-        try:
+
+        def compress_one(source: Path):
             original = source.stat().st_size
             target_kb = max(1, int(original * self.compress_percent.get() / 100 / 1024))
-            output, size = compress_image(source, self.output_dir.get(), target_kb=target_kb)
-            kb = size / 1024
-            self.status.set(f"Compressed to {output.name} ({kb:.1f} KB)")
-            messagebox.showinfo("Done", f"Saved to:\n{output}\n\nSize: {kb:.1f} KB")
-        except Exception as exc:
-            messagebox.showerror("Compress failed", str(exc))
+            return compress_image(source, self.output_dir.get(), target_kb=target_kb)
+
+        self._run_batch("Compress", sources, compress_one)
 
     def _run_rotate(self) -> None:
-        source = self._validate_source(self.rotate_path.get())
-        if not source:
+        sources = self._validate_sources(self.rotate_path, self.rotate_paths)
+        if not sources:
             return
-        try:
-            output = rotate_image(
+        self._run_batch(
+            "Rotate",
+            sources,
+            lambda source: rotate_image(
                 source,
                 self.output_dir.get(),
                 self.rotate_degrees.get(),
                 self.rotate_direction.get(),
-            )
-            self.status.set(f"Rotated to {output.name}")
-            messagebox.showinfo("Done", f"Saved to:\n{output}")
-        except Exception as exc:
-            messagebox.showerror("Rotate failed", str(exc))
+            ),
+        )
 
     def _run_flip(self) -> None:
-        source = self._validate_source(self.flip_path.get())
-        if not source:
+        sources = self._validate_sources(self.flip_path, self.flip_paths)
+        if not sources:
             return
-        try:
-            output = flip_image(source, self.output_dir.get(), self.flip_axis.get())
-            self.status.set(f"Flipped to {output.name}")
-            messagebox.showinfo("Done", f"Saved to:\n{output}")
-        except Exception as exc:
-            messagebox.showerror("Flip failed", str(exc))
+        self._run_batch(
+            "Flip",
+            sources,
+            lambda source: flip_image(source, self.output_dir.get(), self.flip_axis.get()),
+        )
 
     def _run_hue(self) -> None:
-        source = self._validate_source(self.hue_path.get())
-        if not source:
+        sources = self._validate_sources(self.hue_path, self.hue_paths)
+        if not sources:
             return
-        try:
-            output = adjust_hue_image(source, self.output_dir.get(), self.hue_shift.get())
-            self.status.set(f"Hue adjusted to {output.name}")
-            messagebox.showinfo("Done", f"Saved to:\n{output}")
-        except Exception as exc:
-            messagebox.showerror("Hue adjust failed", str(exc))
+        self._run_batch(
+            "Hue export",
+            sources,
+            lambda source: adjust_hue_image(source, self.output_dir.get(), self.hue_shift.get()),
+        )
+
+    def _run_transparent(self) -> None:
+        sources = self._validate_sources(self.transparent_path, self.transparent_paths)
+        if not sources:
+            return
+        self._run_batch(
+            "Transparent export",
+            sources,
+            lambda source: transparent_white_image(source, self.output_dir.get()),
+        )
 
     def _run_meme_export(self) -> None:
         base_path = self.meme_base_path.get()

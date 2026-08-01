@@ -1,12 +1,18 @@
 @echo off
 cd /d "%~dp0"
 
+call setup.bat
+if errorlevel 1 goto :error
+
+set "VENV_PYTHON=%CD%\.venv\Scripts\python.exe"
+set "UV_CACHE_DIR=%CD%\.uv-cache"
+
 echo Installing build dependencies...
-python -m pip install -r requirements.txt -r requirements-build.txt -q
+uv pip install --python "%VENV_PYTHON%" -r requirements-build.txt -q
 if errorlevel 1 goto :error
 
 echo Building Windy Image Tool.exe...
-python -m PyInstaller ^
+"%VENV_PYTHON%" -m PyInstaller ^
   --noconfirm ^
   --onefile ^
   --windowed ^

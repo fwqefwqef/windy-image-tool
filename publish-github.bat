@@ -1,35 +1,64 @@
 @echo off
-setlocal
+setlocal EnableExtensions
 cd /d "%~dp0"
 
-where gh >nul 2>&1
+where git >nul 2>&1
 if errorlevel 1 (
-  echo GitHub CLI is not installed. Install it with: winget install GitHub.cli
+  echo Git is not installed or is not available on PATH.
   exit /b 1
 )
 
-gh auth status >nul 2>&1
+git rev-parse --is-inside-work-tree >nul 2>&1
 if errorlevel 1 (
-  echo Not logged into GitHub. Run this first:
-  echo   gh auth login
+  echo This folder is not a Git repository.
   exit /b 1
 )
 
-echo Building portable exe...
-call build.bat
-if errorlevel 1 exit /b 1
-
-echo Creating GitHub repository and pushing source...
-gh repo view windy-image-tool >nul 2>&1
+git remote get-url origin >nul 2>&1
 if errorlevel 1 (
-  gh repo create windy-image-tool --public --source=. --remote=origin --push
-) else (
-  git push -u origin master
+  echo The GitHub remote named origin is not configured.
+  exit /b 1
 )
 
-echo Creating GitHub release with exe...
-gh release create v1.0.0 "dist\Windy Image Tool.exe" --title "Windy Image Tool v1.0.0" --notes "Portable Windows build of Windy Image Tool. Download Windy Image Tool.exe — no Python install required."
+for /f "delims=" %%i in ('git branch --show-current') do set "BRANCH=%%i"
+if not defined BRANCH (
+  echo Cannot publish while Git is in detached HEAD state.
+  exit /b 1
+)
+
+set "COMMIT_MESSAGE=%~1"
+if not defined COMMIT_MESSAGE set "COMMIT_MESSAGE=Update Windy Image Tool"
+
+echo Staging project changes...
+git add --all
+if errorlevel 1 goto :error
+
+git diff --cached --quiet
+if errorlevel 1 goto :commit
+echo No new changes to commit.
+goto :push
+
+:commit
+echo Committing as: %COMMIT_MESSAGE%
+git commit -m "%COMMIT_MESSAGE%"
+if errorlevel 1 goto :error
+
+:push
+echo Pushing %BRANCH% to GitHub...
+git push -u origin "%BRANCH%"
+if errorlevel 1 goto :push_error
 
 echo.
-echo Done.
-for /f "delims=" %%i in ('gh repo view --json url -q .url') do echo Repository: %%i/releases
+echo Published successfully.
+for /f "delims=" %%i in ('git remote get-url origin') do echo Repository: %%i
+exit /b 0
+
+:push_error
+echo.
+echo GitHub rejected the push. Check your network, credentials, and whether the remote branch has newer commits.
+exit /b 1
+
+:error
+echo.
+echo Publishing failed before the push completed.
+exit /b 1

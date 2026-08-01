@@ -11,16 +11,21 @@ A minimal desktop app for common image tasks on Windows.
 - Rotate (90° / 180° / 270°, left or right)
 - Flip horizontally or vertically
 - Adjust hue with live preview
+- Remove near-white backgrounds to transparent PNG
+- Batch selection for convert, crop, resize, compress, rotate, flip, hue, and transparency tools
+- Add multiple image layers to a meme in one selection
 - Customizable font size, background color, and text color
+
+For tools with a preview, the first selected image drives the preview and initial settings. The chosen settings are then applied to every image in the batch; files that fail are reported without stopping the remaining images.
 
 ## Run from source
 
 ```bat
-pip install -r requirements.txt
-python main.py
+setup.bat
+run.bat
 ```
 
-Or double-click `run.bat`.
+Or just double-click `run.bat`; it creates a local `.venv` and installs missing dependencies automatically through `uv`.
 
 ## Build the portable `.exe`
 
@@ -33,3 +38,11 @@ The executable is written to `dist/Windy Image Tool.exe`.
 ## Downloads
 
 Get the latest portable Windows build from [Releases](https://github.com/fwqefwqef/windy-image-tool/releases).
+
+## Publish source changes
+
+Run `publish-github.bat` to stage, commit, and push the current branch to the configured `origin` remote. You can optionally supply a commit message:
+
+```bat
+publish-github.bat "Describe the changes"
+```

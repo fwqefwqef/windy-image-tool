@@ -4,7 +4,7 @@ import io
 import os
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 MEME_FONTS = {
     "Impact": "impact.ttf",
@@ -390,4 +390,30 @@ def export_meme(
 
     destination = unique_output_path(output_path, f"{Path(base_path).stem}_meme", suffix)
     save_image(composed, destination, fmt)
+    return destination
+
+
+WHITE_RGB = (252, 252, 252)
+WHITE_TOLERANCE = 10
+WHITE_THRESHOLD = WHITE_RGB[0] - WHITE_TOLERANCE
+
+
+def make_white_transparent(image: Image.Image) -> Image.Image:
+    rgba = image.convert("RGBA")
+    r, g, b, a = rgba.split()
+    threshold = WHITE_THRESHOLD
+    r_ok = r.point(lambda v, t=threshold: 255 if v >= t else 0)
+    g_ok = g.point(lambda v, t=threshold: 255 if v >= t else 0)
+    b_ok = b.point(lambda v, t=threshold: 255 if v >= t else 0)
+    white_mask = ImageChops.multiply(ImageChops.multiply(r_ok, g_ok), b_ok)
+    rgba.putalpha(ImageChops.subtract(a, white_mask))
+    return rgba
+
+
+def transparent_white_image(source_path: str | Path, output_dir: str | Path) -> Path:
+    image = load_image(source_path)
+    result = make_white_transparent(image)
+    output_path = ensure_output_dir(output_dir)
+    destination = unique_output_path(output_path, f"{Path(source_path).stem}_transparent", ".png")
+    save_image(result, destination, "PNG")
     return destination
