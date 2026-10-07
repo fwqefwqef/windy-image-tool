@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import math
 import os
 from pathlib import Path
 
@@ -118,11 +119,21 @@ def crop_image(
 def resize_image(
     source_path: str | Path,
     output_dir: str | Path,
-    width: int,
-    height: int,
+    width: int | None = None,
+    height: int | None = None,
+    *,
+    percentage: float | None = None,
 ) -> Path:
+    if percentage is not None:
+        if not math.isfinite(percentage) or percentage <= 0:
+            raise ValueError("Percentage must be a finite number greater than zero.")
+    elif width is None or height is None or width <= 0 or height <= 0:
+        raise ValueError("Width and height must be greater than zero.")
     output_path = ensure_output_dir(output_dir)
     image = load_image(source_path)
+    if percentage is not None:
+        width = max(1, round(image.width * percentage / 100))
+        height = max(1, round(image.height * percentage / 100))
     resized = image.resize((width, height), Image.Resampling.LANCZOS)
     suffix = Path(source_path).suffix.lower() or ".png"
     destination = unique_output_path(output_path, f"{Path(source_path).stem}_resized", suffix)

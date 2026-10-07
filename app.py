@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import tkinter as tk
 from pathlib import Path
 from tkinter import colorchooser, filedialog, messagebox, ttk
@@ -622,6 +624,8 @@ class WindyImageTool(tk.Tk):
 
         self.resize_path = tk.StringVar()
         self.resize_paths: list[Path] = []
+        self.resize_mode = tk.StringVar(value="pixels")
+        self.resize_percent = tk.StringVar(value="100")
         self.resize_w = tk.IntVar(value=800)
         self.resize_h = tk.IntVar(value=600)
         self.preserve_aspect = tk.BooleanVar(value=True)
@@ -909,6 +913,25 @@ class WindyImageTool(tk.Tk):
         ttk.Entry(row, textvariable=self.resize_path).pack(side="left", fill="x", expand=True, padx=8)
         ttk.Button(row, text="Browse", command=self._load_resize_image).pack(side="left")
 
+        mode_row = ttk.Frame(frame)
+        mode_row.pack(fill="x", pady=(0, 10))
+        ttk.Label(mode_row, text="Resize by:").pack(side="left")
+        for label, mode in (("Pixels", "pixels"), ("Percentage", "percentage")):
+            ttk.Radiobutton(
+                mode_row, text=label, variable=self.resize_mode, value=mode,
+                command=self._update_resize_mode,
+            ).pack(side="left", padx=8)
+
+        percent_row = ttk.Frame(frame)
+        percent_row.pack(fill="x", pady=(0, 10))
+        ttk.Label(percent_row, text="Percentage:").pack(side="left")
+        self.resize_percent_spin = ttk.Spinbox(
+            percent_row, from_=0.1, to=1000, increment=10,
+            textvariable=self.resize_percent, width=10,
+        )
+        self.resize_percent_spin.pack(side="left", padx=6)
+        ttk.Label(percent_row, text="% (100 = original size)").pack(side="left")
+
         size_row = ttk.Frame(frame)
         size_row.pack(fill="x", pady=(0, 10))
         ttk.Label(size_row, text="Width:").pack(side="left")
@@ -923,15 +946,19 @@ class WindyImageTool(tk.Tk):
         height_spin.bind("<KeyRelease>", lambda _e: self._on_height_change())
         height_spin.configure(command=self._on_height_change)
 
-        ttk.Checkbutton(
+        self.resize_pixel_controls = [width_spin, height_spin]
+        aspect_check = ttk.Checkbutton(
             frame,
             text="Preserve aspect ratio",
             variable=self.preserve_aspect,
-        ).pack(anchor="w", pady=(0, 16))
+        )
+        aspect_check.pack(anchor="w", pady=(0, 16))
+        self.resize_pixel_controls.append(aspect_check)
+        self._update_resize_mode()
 
         ttk.Label(
             frame,
-            text="Size starts from the first selected image and is applied to the full batch.",
+            text="Pixels: one size for the batch. Percentage: scales each image from its original size.",
             style="Muted.TLabel",
         ).pack(anchor="w", pady=(0, 12))
 
@@ -1267,6 +1294,12 @@ class WindyImageTool(tk.Tk):
             return
         self.crop_canvas.set_image(image)
         self._sync_visible_heavy_panels(force_redraw=True)
+
+    def _update_resize_mode(self) -> None:
+        percentage_mode = self.resize_mode.get() == "percentage"
+        self.resize_percent_spin.configure(state="normal" if percentage_mode else "disabled")
+        for control in self.resize_pixel_controls:
+            control.configure(state="disabled" if percentage_mode else "normal")
 
     def _load_resize_image(self) -> None:
         paths = self._pick_files(self.resize_path, self.resize_paths)
@@ -1753,14 +1786,26 @@ class WindyImageTool(tk.Tk):
         sources = self._validate_sources(self.resize_path, self.resize_paths)
         if not sources:
             return
+        try:
+            percentage = None
+            width = height = None
+            if self.resize_mode.get() == "percentage":
+                percentage = float(self.resize_percent.get())
+                if not math.isfinite(percentage) or percentage <= 0:
+                    raise ValueError("Percentage must be a finite number greater than zero.")
+            else:
+                width, height = self.resize_w.get(), self.resize_h.get()
+                if width <= 0 or height <= 0:
+                    raise ValueError("Width and height must be greater than zero.")
+        except (ValueError, tk.TclError) as exc:
+            messagebox.showerror("Invalid resize settings", str(exc))
+            return
+        output_dir = self.output_dir.get()
         self._run_batch(
             "Resize",
             sources,
             lambda source: resize_image(
-                source,
-                self.output_dir.get(),
-                self.resize_w.get(),
-                self.resize_h.get(),
+                source, output_dir, width, height, percentage=percentage,
             ),
         )
 

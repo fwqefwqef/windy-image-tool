@@ -6,7 +6,7 @@ A minimal desktop app for common image tasks on Windows.
 
 - Convert formats (JPEG, PNG, WEBP, AVIF, BMP, GIF, TIFF)
 - Crop with draggable bounds or numeric inputs
-- Resize with optional aspect ratio lock
+- Resize by pixels with optional aspect ratio lock, or by percentage across the entire batch
 - Compress with auto or target file size
 - Rotate (90° / 180° / 270°, left or right)
 - Flip horizontally or vertically
@@ -17,6 +17,8 @@ A minimal desktop app for common image tasks on Windows.
 - Customizable font size, background color, and text color
 
 For tools with a preview, the first selected image drives the preview and initial settings. The chosen settings are then applied to every image in the batch; files that fail are reported without stopping the remaining images.
+
+In Resize, choose Percentage and enter a value such as 50 to halve every image's width and height, or 200 to double them. Each image is scaled from its own original dimensions, with a minimum of one pixel per dimension.
 
 ## Run from source
 
